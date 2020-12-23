@@ -1,0 +1,233 @@
+// Module included in the following assemblies:
+//
+// working-with-pods/rosa-pod-identity-webhook.adoc
+
+
+[id="rosa-pod-identity-webhook_{context}"]
+= Creating an Amazon Elastic Kubernetes Service pod identity webhook
+
+This webhook is for Amazon Elastic Kubernetes Service (Amazon EKS) mutating pods that require AWS IAM access.
+
+.Procedure
+
+To create a webhook:
+
+. link:https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html[Create an OIDC provider] in IAM for your cluster. You can find the OIDC discovery endpoint by describing your EKS cluster as follows. Enter `sts.amazonaws.com` as the `client-id`.
+
+[source, terminal]
+----
+aws eks describe-cluster --name $CLUSTER_NAME --query cluster.identity.oidc
+----
+
+. Create an IAM role for your pods and link:https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html[modify the trust policy] to allow your pod's service account to use the role:
+
+.Example input
+[source, terminal]
+----
+{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Effect": "Allow",
+   "Principal": {
+    "Federated": "arn:aws:iam::111122223333:oidc-provider/oidc.us-west-2.eks.amazonaws.com/624a142e-43fc-4a4e-9a65-0adbfe9d6a85"
+   },
+   "Action": "sts:AssumeRoleWithWebIdentity",
+   "Condition": {
+    "__doc_comment": "scope the role to the service account (optional)",
+    "StringEquals": {
+     "oidc.us-west-2.eks.amazonaws.com/624a142e-43fc-4a4e-9a65-0adbfe9d6a85:sub": "system:serviceaccount:default:my-serviceaccount"
+    },
+    "__doc_comment": "scope the role to a namespace (optional)",
+    "StringLike": {
+     "oidc.us-west-2.eks.amazonaws.com/624a142e-43fc-4a4e-9a65-0adbfe9d6a85:sub": "system:serviceaccount:default:*"
+    }
+   }
+  }
+ ]
+}
+----
+
+. Modify your pod's service account to be annotated with the ARN of the role you want the pod to use.
+
+.Example input
+[source, terminal]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-serviceaccount
+  namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::111122223333:role/s3-reader"
+----
++
+All new pod pods launched using this Service Account will be modified to use IAM for pods. The following example is a pod spec with the environment variables and volume fields added by the webhook.
++
+.Example output
+[source, terminal]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  namespace: default
+spec:
+  serviceAccountName: my-serviceaccount
+  containers:
+  - name: container-name
+    image: container-image:version
+### Everything below is added by the webhook ###
+    env:
+    - name: AWS_DEFAULT_REGION
+      value: us-west-2
+    - name: AWS_REGION
+      value: us-west-2
+    - name: AWS_ROLE_ARN
+      value: "arn:aws:iam::111122223333:role/s3-reader"
+    - name: AWS_WEB_IDENTITY_TOKEN_FILE
+      value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+    volumeMounts:
+    - mountPath: "/var/run/secrets/eks.amazonaws.com/serviceaccount/"
+      name: aws-token
+  volumes:
+  - name: aws-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          audience: "sts.amazonaws.com"
+          expirationSeconds: 86400
+          path: token
+----
+
+[id="rosa-working-with-windows-container-workloads_{context}"]
+= Working with Windows container workloads
+To ensure workloads are scheduled on `windows` nodes have the right environment variables, they must have a `nodeSelector` targeting `windows` it must run on.
+
+[NOTE]
+====
+Workloads targeting `windows` nodes using `nodeAffinity` are currently not supported.
+====
+
+.Examples
+
+This example shows node selection for beta Kuberbetes:
+
+[source, terminal]
+----
+nodeSelector:
+  beta.kubernetes.io/os: windows
+----
+
+This example shows node selection for Kubernetes 1.14 or higher:
+
+[source, terminal]
+----
+nodeSelector:
+    kubernetes.io/os: windows
+----
+
+. Injecting `AWS_DEFAULT_REGION`
+
+When the `aws-default-region` argument is set, this webhook injects `AWS_DEFAULT_REGION` and `AWS_REGION` in mutated containers if `AWS_DEFAULT_REGION` and `AWS_REGION` are not already set.
+
+.`amazon-eks-pod-identity-webhook` arguments
+[cols="30,70"]
+|===
+|Option |Definition
+
+|--alsologtostderr
+|Log to both the standard error and the files.
+
+|--annotation-prefix
+|The service account annotation (string) to look for. Default: `eks.amazonaws.com`
+
+|--aws-default-region
+|If set, `AWS_DEFAULT_REGION` and `AWS_REGION` will be set to this string value in mutated containers.
+
+|--in-cluster
+|If set to `true`, uses the in-cluster authentication and certificate request API. Default: `true`
+
+|--kube-api string
+|(out-of-cluster) The URL to the API server.
+
+|--kubeconfig
+|(out-of-cluster) Absolute path (string) to the API server `kubeconfig` file.
+
+|--log_backtrace_at traceLocation
+|When logging reaches the line `file:N`, a stack trace is emitted. Default: `0`
+
+|--log_dir
+|Specifies the directory (string) to write log files.
+
+|--log_file
+|Specifies the log file (string) to use.
+
+|--log_file_max_size
+|Defines the maximum size (megabytes) a log file can grow to. If the value is `0`, the maximum file size is unlimited. Default: `1800`
+
+|--logtostderr
+|Logs to standard error instead of to files. Default: `true`
+
+|--namespace
+|(in-cluster)
+|The namespace name (string) this webhook and the tls secret resides in. Default: `eks`
+
+|--port
+|Port to listen on. Default: `443`
+
+|--service-name
+|(in-cluster) The service name (string) fronting this webhook. Default: `pod-identity-webhook`
+
+|--skip_headers
+|If `true`, does not display header prefixes in the log messages.
+
+|--skip_log_headers
+|If `true`, does not display headers when opening log files.
+
+|--stderrthreshold severity
+|Logs at or above the specified threshold go to stderr. Default: `2`
+
+|--tls-cert string
+|(out-of-cluster) TLS certificate file path (default "/etc/webhook/certs/tls.cert")
+
+|--tls-key string
+|(out-of-cluster) TLS key file path (default "/etc/webhook/certs/tls.key")
+
+|--tls-secret string
+|(in-cluster) The secret name for storing the TLS serving cert (default "pod-identity-webhook")
+
+|--token-audience string
+|The default audience for tokens. Can be overridden by annotation (default "sts.amazonaws.com")
+
+|--token-expiration int
+|The token expiration (default 86400)
+
+|--token-mount-path string
+|The path to mount tokens (default "/var/run/secrets/eks.amazonaws.com/serviceaccount")
+
+|--v Level
+|Number for the log level verbosity
+
+|--version
+|Display the version and exit
+
+|--vmodule moduleSpec
+|Comma-separated list of pattern=N settings for file-filtered logging
+|===
+
+[id="rosa-in-cluster-installation_{context}"]
+= In-cluster installation
+
+The in-cluster installation of the Amazon EKS webhook lets you use the provided configuration files in the `deploy` directory, along with the provided `Makefile`.
+
+This command:
++
+* Creates a service account, role, cluster-role, role-binding, and cluster-role-binding that will the deployment requires
+* Creates the deployment, service, and mutating webhook in the cluster
+* Approves the CSR that the deployment created for its TLS serving certificate
+
+[source, terminal]
+----
+make cluster-up IMAGE=602401143452.dkr.ecr.us-west-2.amazonaws.com/eks/pod-identity-webhook:latest
+----
